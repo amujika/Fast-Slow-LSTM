@@ -3,11 +3,6 @@
 import numpy as np
 import tensorflow as tf
 
-#TODO: Change to use flags
-
-def data_type():
-  return tf.float16 if False else tf.float32
-
 #Returns an orthogonal matrix of the given shape
 def orthogonal(shape):
     flat_shape = (shape[0], np.prod(shape[1:]))
@@ -18,7 +13,7 @@ def orthogonal(shape):
 
 #Returns an initializer that outputs an orthogonal matrix
 def orthogonal_initializer(scale=1.0):
-    def _initializer(shape, dtype=data_type(), partition_info=None):
+    def _initializer(shape, dtype=tf.float32, partition_info=None):
         return tf.constant(orthogonal(shape) * scale, dtype)
     return _initializer
 
@@ -26,7 +21,7 @@ def orthogonal_initializer(scale=1.0):
 def layer_norm_all(h, base, num_units, scope):
     # Layer Norm (faster version)
     #
-    # Performas layer norm on multiple base at once (ie, i, g, j, o for lstm)
+    # Performs layer norm on multiple base at once (ie, i, g, j, o for lstm)
     #
     # Reshapes h in to perform layer norm in parallel
     with tf.variable_scope(scope):
@@ -40,9 +35,9 @@ def layer_norm_all(h, base, num_units, scope):
         h = tf.reshape(h_reshape, [-1, base * num_units])
 
         alpha = tf.get_variable('layer_norm_alpha', [4 * num_units],
-                                initializer=tf.constant_initializer(1.0), dtype=data_type())
+                                initializer=tf.constant_initializer(1.0), dtype=tf.float32)
         bias = tf.get_variable('layer_norm_bias', [4 * num_units],
-                               initializer=tf.constant_initializer(0.0), dtype=data_type())
+                               initializer=tf.constant_initializer(0.0), dtype=tf.float32)
 
     return (h * alpha) + bias
 
@@ -64,9 +59,9 @@ def layer_norm(x, scope="layer_norm", alpha_start=1.0, bias_start=0.0):
         num_units = x.get_shape().as_list()[1]
 
         alpha = tf.get_variable('alpha', [num_units],
-                                initializer=tf.constant_initializer(alpha_start), dtype=data_type())
+                                initializer=tf.constant_initializer(alpha_start), dtype=tf.float32)
         bias = tf.get_variable('bias', [num_units],
-                               initializer=tf.constant_initializer(bias_start), dtype=data_type())
+                               initializer=tf.constant_initializer(bias_start), dtype=tf.float32)
 
         mean, variance = moments_for_layer_norm(x)
         y = (alpha * (x - mean)) / (variance) + bias

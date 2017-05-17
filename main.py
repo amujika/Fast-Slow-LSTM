@@ -21,27 +21,19 @@ import tensorflow as tf
 import aux
 import reader
 import configs
-import FSLSTM
+import LNLSTM
+import FSRNN
 
 flags = tf.flags
-logging = tf.logging
 
 flags.DEFINE_string(
-    "model", "enwik8",
+    "model", "ptb",
     "A type of model. Check configs file to know which models are available.")
 flags.DEFINE_string("data_path", 'data/',
                     "Where the training/test data is stored.")
 flags.DEFINE_string("save_path", 'models/',
                     "Model output directory.")
-flags.DEFINE_bool("use_fp16", False,
-                  "Train using 16-bit floats instead of 32bit floats")
-
 FLAGS = flags.FLAGS
-
-
-def data_type():
-    return tf.float16 if FLAGS.use_fp16 else tf.float32
-
 
 class PTBInput(object):
     """The input data."""
@@ -67,76 +59,53 @@ class PTBModel(object):
         S_size = config.hyper_size
         vocab_size = config.vocab_size
 
-        self._initial_state = tf.zeros([batch_size,
-                                        F_size * 2
-                                        + S_size * 2], dtype=data_type())
-
-        # emb_init = tf.random_uniform_initializer(minval=-config.init_scale,
-        #                                         maxval= config.init_scale, dtype=data_type())
         emb_init = aux.orthogonal_initializer(1.0)
         with tf.device("/cpu:0"):
             embedding = tf.get_variable(
-                "embedding", [vocab_size, emb_size], initializer=emb_init, dtype=data_type())
+                "embedding", [vocab_size, emb_size], initializer=emb_init, dtype=tf.float32)
             inputs = tf.nn.embedding_lookup(embedding, input_.input_data)
 
-        if is_training and config.in_k_prob < 1:
-            inputs = tf.nn.dropout(inputs, config.in_k_prob)
+        F_cells = [LNLSTM.LN_LSTMCell(F_size, use_zoneout=True, is_training=is_training,
+                                      zoneout_keep_h=config.zoneout_h, zoneout_keep_c=config.zoneout_c)
+                   for _ in range(config.fast_layers)]
 
-        # Simplified version of tensorflow.models.rnn.rnn.py's rnn().
-        # This builds an unrolled LSTM for tutorial purposes only.
-        # In general, use the rnn() or state_saving_rnn() from rnn.py.
+
+        S_cell  = LNLSTM.LN_LSTMCell(S_size, use_zoneout=True, is_training=is_training,
+                                     zoneout_keep_h=config.zoneout_h, zoneout_keep_c=config.zoneout_c)
+
+        FS_cell = FSRNN.FSRNNCell(F_cells, S_cell, config.keep_prob, is_training)
+        self._initial_state = FS_cell.zero_state(batch_size, tf.float32)
+        state = self._initial_state
 
         outputs = []
-
-        F_state = tf.slice(self._initial_state, [0, 0],
-                           [-1, config.cell_size * 2])
-        S_state = tf.slice(self._initial_state, [0, config.cell_size * 2],
-                           [-1, config.hyper_size * 2])
-
-        F_state = tf.split(axis=1, num_or_size_splits=2, value=F_state)
-        S_state = tf.split(axis=1, num_or_size_splits=2, value=S_state)
-
-        F1 = FSLSTM.LN_LSTMCell(F_size, use_zoneout=True, use_out_drop=True, is_training=is_training,
-                                zoneout_keep_h=config.zoneout_h, zoneout_keep_c=config.zoneout_c,
-                                out_keep_prob=config.out_k_prob)
-        S = FSLSTM.LN_LSTMCell( S_size, use_zoneout=True, use_out_drop=True, is_training=is_training,
-                                zoneout_keep_h=config.zoneout_h, zoneout_keep_c=config.zoneout_c,
-                                out_keep_prob=config.out_k_prob)
-        F2 = FSLSTM.LN_LSTMCell(F_size, use_zoneout=True, use_out_drop=True, is_training=is_training,
-                                zoneout_keep_h=config.zoneout_h, zoneout_keep_c=config.zoneout_c,
-                                out_keep_prob=config.out_k_prob)
-
         print('generating graph')
         with tf.variable_scope("RNN"):
             for time_step in range(num_steps):
                 if time_step > 0: tf.get_variable_scope().reuse_variables()
+                out, state = FS_cell(inputs[:, time_step, :], state)
+                outputs.append(out)
 
-                F_out, F_state = F1(inputs[:, time_step, :], F_state, 'F1')
-                S_out, S_state = S( F_out, S_state, 'S')
-                F_out, F_state = F2(S_out, F_state, 'F2')
-
-                outputs.append(F_out)
         print('graph generated')
         output = tf.reshape(tf.concat(axis=1, values=outputs), [-1, F_size])
-        # out_init = tf.random_uniform_initializer(minval=-config.init_scale,
-        #                                         maxval= config.init_scale, dtype=data_type())
+
+        # Output layer and cross entropy loss
+
         out_init = aux.orthogonal_initializer(1.0)
         softmax_w = tf.get_variable(
-            "softmax_w", [F_size, vocab_size], initializer=out_init, dtype=data_type())
-        softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
+            "softmax_w", [F_size, vocab_size], initializer=out_init, dtype=tf.float32)
+        softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=tf.float32)
         logits = tf.matmul(output, softmax_w) + softmax_b
         loss = tf.contrib.legacy_seq2seq.sequence_loss_by_example(
             [logits],
             [tf.reshape(input_.targets, [-1])],
-            [tf.ones([batch_size * num_steps], dtype=data_type())])
+            [tf.ones([batch_size * num_steps], dtype=tf.float32)])
         self._cost = cost = tf.reduce_sum(loss) / batch_size
 
-        F_state = tf.concat(axis=1, values=[F_state[0], F_state[1]])
-        S_state = tf.concat(axis=1, values=[S_state[0], S_state[1]])
-        self._final_state = tf.concat(axis=1, values=(F_state, S_state))
+        self._final_state = state
 
-        if not is_training:
-            return
+        if not is_training: return
+
+        # Create the parameter update ops if training
 
         self._lr = tf.Variable(0.0, trainable=False, dtype=tf.float32)
         tvars = tf.trainable_variables()
@@ -207,8 +176,8 @@ def run_epoch(session, model, eval_op=None, verbose=False):
         iters += model.input.num_steps
 
         if verbose and step % (model.input.epoch_size // 10) == 10:
-            print("%.3f perplexity: %.3f speed: %.0f wps" %
-                  (step * 1.0 / model.input.epoch_size, costs / iters,
+            print("%.3f BPC: %.3f speed: %.0f characters per second" %
+                  (step * 1.0 / model.input.epoch_size, costs / (iters * 0.69314718056),
                    iters * model.input.batch_size / (time.time() - start_time)))
 
         sys.stdout.flush()
@@ -259,7 +228,7 @@ def main(_):
             session.run(tf.global_variables_initializer())
             coord = tf.train.Coordinator()
             threads = tf.train.start_queue_runners(sess=session, coord=coord)
-
+            #saver.restore(session, FLAGS.save_path + 'model.ckpt')
             previous_val = 9999
             for i in range(config.max_max_epoch):
                 lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
@@ -267,9 +236,9 @@ def main(_):
 
                 print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
                 train_perplexity = run_epoch(session, m, eval_op=m.train_op, verbose=True)
-                print("Epoch: %d Train Perplexity: %.4f" % (i + 1, train_perplexity))
+                print("Epoch: %d Train BPC: %.4f" % (i + 1, train_perplexity))
                 valid_perplexity = run_epoch(session, mvalid)
-                print("Epoch: %d Valid Perplexity: %.4f" % (i + 1, valid_perplexity))
+                print("Epoch: %d Valid BPC: %.4f" % (i + 1, valid_perplexity))
                 sys.stdout.flush()
 
                 if valid_perplexity < previous_val:
