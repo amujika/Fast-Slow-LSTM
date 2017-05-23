@@ -241,12 +241,18 @@ def main(_):
                 print("Epoch: %d Valid BPC: %.4f" % (i + 1, valid_perplexity))
                 sys.stdout.flush()
 
+                if i == 180: config.learning_rate *= 0.1
+
                 if valid_perplexity < previous_val:
                     print("Storing weights")
                     saver.save(session, FLAGS.save_path + 'model.ckpt')
                     previous_val = valid_perplexity
+                    counter_val = 0
                 elif config.dataset == 'enwik8':
-                    config.learning_rate *= 0.1
+                    counter_val += 1
+                    if counter_val == 2:
+                        config.learning_rate *= 0.1
+                        counter_val = 0
 
             print("Loading best weights")
             saver.restore(session, FLAGS.save_path + 'model.ckpt')
